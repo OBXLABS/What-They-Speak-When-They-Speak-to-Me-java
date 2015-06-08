@@ -1,0 +1,377 @@
+import java.awt.Color;
+import java.awt.Rectangle;
+import java.awt.geom.Point2D;
+
+import processing.opengl.*;
+
+import fullscreen.*;
+import japplemenubar.*;
+
+import net.nexttext.*;
+import net.nexttext.behaviour.*;
+import net.nexttext.behaviour.standard.*;
+import net.nexttext.behaviour.control.*;
+import net.nexttext.property.*;
+
+import PQSDKMultiTouch.*;
+
+import TUIO.TuioCursor;
+import TUIO.TuioProcessing;
+
+/**
+ * A NextText-based interactive poem which is broken down into clusters of text which 
+ * float around in empty space. When a letter is dragged, all the following letters 
+ * in the stanza come into focus and follow the line drawn by the mouse path.
+ *
+ * interactive artwork by Jason Lewis with Elie Zananiri
+ * Processing port by Elie Zananiri | Obx Labs | June 2007
+ */
+
+// constants
+float PATH_POINTDISTANCE = 20.0;
+Color IDLE_COLOR = new Color(0.5f, 0.5f, 0.5f, 0.1f);
+Color IDLE_HIGHLIGHT_COLOR = new Color(0.5f, 0.5f, 0.5f, 0.3f);
+Color SELECTED_COLOR = new Color(1.0f, 1.0f, 1.0f, 1.0f);
+Color STROKE_COLOR = new Color(0.0f, 0.0f, 0.0f, 0.0f);
+float COLOR_SPEED = 10.0f;
+float ROTATE_SPEED = (float)Math.PI/40;
+boolean FULLSCREEN = false;
+int FULLSCREEN_ID = 0;
+int FPS = 30;
+boolean PQLABS_TOUCHSCREEN = false;
+boolean TUIO_TOUCHSCREEN = false;
+boolean CURSOR = !(PQLABS_TOUCHSCREEN || TUIO_TOUCHSCREEN);
+
+// variables
+Book book;
+SnakePath snakePath;
+PFont font;
+int fontSize = 36;
+
+AbstractBehaviour topBehaviour;
+Repeat repeat;
+Condition isInSnake;
+
+Multiplexer inSnakeActions;
+Multiplexer outOfSnakeActions;
+
+net.nexttext.behaviour.Action colorizeSelected;
+net.nexttext.behaviour.Action followLeaderPath;
+
+net.nexttext.behaviour.Action colorizeIdle;
+net.nexttext.behaviour.Action swim;
+net.nexttext.behaviour.Action rotateBack;
+
+SoftFullScreen fs;
+
+//pqlabs touch client
+TouchClient touchClient = null;
+
+//tuio touch client
+TuioProcessing tuioClient = null;
+int tuioPort = 3333;
+
+void setup() {
+  if (PQLABS_TOUCHSCREEN || TUIO_TOUCHSCREEN)
+    size(1920, 1080, OPENGL);
+  else
+    size(1650, 1080);
+  frameRate(FPS);
+  smooth();
+
+  //turn of cursor if needed
+  if (!CURSOR) noCursor();
+
+  //create the book
+  book = new Book(this);
+
+  // create the mouse path input source and add it to the manager
+  if (PQLABS_TOUCHSCREEN)
+    snakePath = new SnakeTouchPath(this, book, PATH_POINTDISTANCE);
+  else if (TUIO_TOUCHSCREEN)
+    snakePath = new SnakeTuioPath(this, book, PATH_POINTDISTANCE);
+  else
+    snakePath = new SnakeMousePath(this, book, PATH_POINTDISTANCE);
+
+  book.getInputs().add("SnakePath", snakePath);
+  
+  font = createFont("GillSans-UltraBold.ttf", fontSize, true);
+  textFont(font);
+  noStroke();
+
+  inSnakeActions = new Multiplexer();
+  colorizeSelected = new Colorize(SELECTED_COLOR, COLOR_SPEED);
+  inSnakeActions.add(colorizeSelected);
+  followLeaderPath = new FollowLeaderPath(snakePath, PATH_POINTDISTANCE);
+  inSnakeActions.add(followLeaderPath);
+
+  outOfSnakeActions = new Multiplexer();
+  colorizeIdle = new ColorizeToOriginal(COLOR_SPEED);
+  outOfSnakeActions.add(colorizeIdle);
+  swim = new Swim(new Rectangle(width, height));
+  outOfSnakeActions.add(swim);
+  rotateBack = new RotateBack(ROTATE_SPEED);
+  outOfSnakeActions.add(rotateBack);
+
+  isInSnake = new IsInSnake(inSnakeActions, outOfSnakeActions);
+  repeat = new Repeat(isInSnake, 0);
+  topBehaviour = new Behaviour(repeat);
+  book.addBehaviour(topBehaviour);
+
+  buildBook();
+
+  if (PQLABS_TOUCHSCREEN) {
+    touchClient = new TouchClient();
+    touchClient.setDelegate((SnakeTouchPath)snakePath);
+  }
+  else if (TUIO_TOUCHSCREEN) {
+    tuioClient  = new TuioProcessing(this, tuioPort);
+  }
+  
+  if (FULLSCREEN) {
+    fs = new SoftFullScreen(this, FULLSCREEN_ID);
+    fs.enter();
+  }
+}
+
+public void buildBook() {
+  // load the text file
+  String lines[] = loadStrings("iwf.txt");
+  for (int i=0; i < lines.length; i++) {
+    if (lines[i].length() != 0) {
+      buildLine(lines[i], new PVector(0, 0, 0));
+    }
+  }
+}
+
+public void buildLine(String text, PVector pos) {
+  // create a new passage
+  TextObjectGroup newGroup = new TextObjectGroup(pos);
+
+  // create a new word and set its temporary position to 0,0,0
+  PVector wOffset = new PVector(0, 0, 0);
+  TextObjectGroup wordGroup = new TextObjectGroup(wOffset);
+
+  // each glyph is offset by gOffset from the word location.
+  // start at 0,0,0
+  PVector gOffset = new PVector(0, 0, 0);
+
+  for (int i=0; i < text.length(); i++) {
+    // get the glyph at position i
+    String glyphString = text.substring(i,i+1);
+
+    // if glyph is a space (end of word)
+    if (glyphString.compareTo(" ") == 0) {
+      // get a random position for the word in the window
+      wOffset =  new PVector(random(1)*width, random(1)*height, 0);
+
+      // set the word position
+      PVectorProperty wordPos = (PVectorProperty)wordGroup.getProperty("Position");
+      wordPos.add(wOffset);
+
+      // attach the word to the passage
+      newGroup.attachChild(wordGroup);
+
+      // create a new word and rest the glyph offset
+      wordGroup = new TextObjectGroup(new PVector(0,0,0));
+      gOffset = new PVector(0,0,0);
+
+      // if the glyph is not a space
+    } 
+    else {
+      // create a new glyph
+      TextObjectGlyph glyph = new TextObjectGlyph(glyphString, font, fontSize, gOffset);
+
+      // initalize the glyph's colour
+      ColorProperty colorProperty = glyph.getColor();
+      Color glyphColor = i == 0 ? IDLE_HIGHLIGHT_COLOR : IDLE_COLOR;
+      colorProperty.set(glyphColor);
+      colorProperty.setOriginal(glyphColor);
+
+      // initalize the glyph's stroke colour
+      ColorProperty strokeColorProperty = glyph.getStrokeColor();
+      Color glyphStrokeColor = STROKE_COLOR;
+      strokeColorProperty.set(glyphStrokeColor);
+      strokeColorProperty.setOriginal(glyphStrokeColor);
+
+      // intialize the "Follower" property
+      BooleanProperty followProperty = new BooleanProperty(false);
+      glyph.init("Follower", followProperty);
+
+      // translate the glyph offset the its width and spacing
+      gOffset.add(new PVector((float)glyph.getLogicalBounds().getWidth(), 0, 0));
+      gOffset.add(new PVector(2, 0));
+
+      // attach the glyph to the word
+      wordGroup.attachChild(glyph);   
+
+      // register the glyph with the behaviour
+      topBehaviour.addObject(glyph);
+    }
+  }
+
+  // get a random position for the word in the window
+  wOffset =  new PVector(random(1)*width, random(1)*height, 0);
+
+  // set the word position
+  PVectorProperty wordPos = (PVectorProperty)wordGroup.getProperty("Position");
+  wordPos.add(wOffset);
+
+  // attach the last word to the passage
+  newGroup.attachChild(wordGroup);
+
+  // attach the passage to the book
+  book.attachText(newGroup);
+}
+
+void draw() {
+  background(0);
+
+  //apply behaviours and draw
+  synchronized(book) {
+    book.step();
+  }
+  book.draw();
+
+  //render the paths
+  updateAndDrawPaths();
+}
+
+public void updateAndDrawPaths() {
+  noFill();
+  stroke(255, 255, 255, 50);
+
+  // get the paths
+  HashMap paths = snakePath.getPaths();
+  Iterator it = paths.keySet().iterator();
+  Integer path_id;
+  ArrayList path;
+  
+  while(it.hasNext()) {
+    // get the path
+    path_id = (Integer)it.next();
+    path = (ArrayList)paths.get(path_id);
+
+    beginShape();
+    // render curves for every set of three points, using the middle one as the control point
+    Point2D point1;
+    for (int i=0; i < path.size(); i++) {
+      point1 = (Point2D)path.get(i);
+      curveVertex((float)point1.getX(), (float)point1.getY());
+    }
+    endShape();
+
+    // draw "webs" at every corner
+    Point2D point2;
+    for (int i=0; i < path.size()-2; i+=1) {
+      point1 = (Point2D)path.get(i);
+      point2 = (Point2D)path.get(i+2);
+      line((int)point1.getX(), (int)point1.getY(), (int)point2.getX(), (int)point2.getY());
+    }
+    
+    //find leader if none assigned
+    if (path.size() == 0) continue; //empty path, can't find leader
+    point1 = (Point2D)path.get(0);  //get start point
+    
+    TextObject theLeader = snakePath.getLeader(path_id);
+    //if ((theLeader == null) && (distance >= pointDistance)) {
+    if (theLeader == null) {
+      TextObjectGlyph currGlyph;
+           
+      TextObjectGlyphIterator i = book.getTextRoot().glyphIterator();
+      while (i.hasNext()) {
+        currGlyph = i.next();
+               
+        if (!isFollower(currGlyph) && !isLeader(currGlyph) &&
+            (currGlyph.getBoundingPolygon().contains(point1.getX(), point1.getY()))) {
+          // set the leader pointer
+          snakePath.setLeader(currGlyph, path_id);
+          snakePath.setFollower(currGlyph, true);
+                   
+          break;
+        }
+      }
+    }
+  }
+}
+/*
+String getUniqueCharacters(String s) {
+  String[] sArray = {s};
+  return getUniqueCharacters(sArray);
+}
+
+String getUniqueCharacters(String[] s) {
+  ArrayList charSet = new ArrayList();
+    
+  for(int i = 0; i < s.length; i++) {
+    println(s[i]);
+    for(int j = 0; j < s[i].length(); j++) {
+      Character c = new Character(s[i].charAt(j));
+      if (!charSet.contains(c))
+        charSet.add(c);
+    }
+  }
+  Collections.sort(charSet);
+ 
+  String charString = "";
+  for(int i = 0; i < charSet.size(); i++)
+    charString += (Character)charSet.get(i);
+  return charString; 
+}*/
+
+/**
+ * Gets the value of the Leader property
+ *
+ * @param to the concerned TextObject
+ *
+ * @return BooleanProperty whether this TextObject has the Leader property or not
+ */
+boolean isLeader(TextObject to) {
+  return ((BooleanProperty)to.getProperty("Leader")).get();
+}
+    
+    
+/**
+ * Gets the value of the Follower property
+ *
+ * @param to the concerned TextObject
+ *
+ * @return BooleanProperty whether this TextObject has the Follower property or not
+ */
+boolean isFollower(TextObject to) {
+  return ((BooleanProperty)to.getProperty("Follower")).get();
+}
+
+/***************************************************************
+ *  TUIO callback methods 
+ ***************************************************************/
+
+//--------------------------------------------------------------
+public void addTuioCursor(TuioCursor tcur) 
+{
+  //Integer id = new Integer(tcur.getCursorID());
+  //Touch touch = new Touch(tcur.getCursorID(), tcur.getScreenX(width), tcur.getScreenY(height));
+  ((SnakeTuioPath)snakePath).mousePressed(tcur.getCursorID(), tcur.getScreenX(width), tcur.getScreenY(height)); 
+}
+
+//--------------------------------------------------------------
+public void updateTuioCursor(TuioCursor tcur) 
+{
+  //Integer id = new Integer(tcur.getCursorID());
+  //synchronized (touches) {
+  //  Touch touch = touches.get(id);
+  //  if (touch != null) touch.set(tcur.getScreenX(width), tcur.getScreenY(height), tcur.getXSpeed(), tcur.getYSpeed());
+  //}
+  ((SnakeTuioPath)snakePath).mouseDragged(tcur.getCursorID(), tcur.getScreenX(width), tcur.getScreenY(height)); 
+}
+
+//--------------------------------------------------------------
+public void removeTuioCursor(TuioCursor tcur) 
+{
+  //Integer id = new Integer(tcur.getCursorID());
+  //synchronized (touches) {
+  //  Touch touch = touches.get(id);
+  //  if (touch != null) touch.die();
+  //}
+  ((SnakeTuioPath)snakePath).mouseReleased(tcur.getCursorID(), tcur.getScreenX(width), tcur.getScreenY(height)); 
+}
